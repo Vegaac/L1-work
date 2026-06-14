@@ -1,0 +1,10 @@
+任务名: ccrl011650
+模型: claude
+Session ID: 5a493e71-a647-480a-abe5-c35b455b6292
+源 jsonl: /Users/caoyang/.claude/projects/-Users-caoyang-AI-Claude-L1-work-ccrl011650-repo-claude/5a493e71-a647-480a-abe5-c35b455b6292.jsonl
+归档 jsonl: /Users/caoyang/AI/Claude/L1-work/ccrl011650/repo-claude/collected/5a493e71-a647-480a-abe5-c35b455b6292.jsonl
+模型目录: /Users/caoyang/AI/Claude/L1-work/ccrl011650/repo-claude
+GitHub 仓库: https://github.com/Vegaac/L1-work.git
+模型分支: l1/ccrl011650-claude
+收集时 commit: f39220058ef83a95225b143f524437cfc18b0f63
+收集时间: 2026-06-14 22:59:38 +0800
