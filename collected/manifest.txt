@@ -1,0 +1,10 @@
+任务名: ccrl011650
+模型: qwen
+Session ID: 769beaae-106f-4b0d-a24a-c0cb21762aee
+源 jsonl: /Users/caoyang/.claude/projects/-Users-caoyang-AI-Claude-L1-work-ccrl011650-repo-qwen/769beaae-106f-4b0d-a24a-c0cb21762aee.jsonl
+归档 jsonl: /Users/caoyang/AI/Claude/L1-work/ccrl011650/repo-qwen/collected/769beaae-106f-4b0d-a24a-c0cb21762aee.jsonl
+模型目录: /Users/caoyang/AI/Claude/L1-work/ccrl011650/repo-qwen
+GitHub 仓库: https://github.com/Vegaac/L1-work.git
+模型分支: l1/ccrl011650-qwen
+收集时 commit: dd83662ac54f726b91eb9525ff7d7c735121c14a
+收集时间: 2026-06-14 22:59:37 +0800

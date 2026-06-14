@@ -31,11 +31,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import java.util.Collections;
+import java.util.HashMap;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -741,5 +743,441 @@ public class AuthStateTest {
                 .build();
         AuthState state = new AuthState(regResp);
         state.getClientAuthentication();
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_refreshFails_exceptionPassedToAction() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service,
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                action);
+
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        // simulate refresh failure
+        AuthorizationException refreshException =
+                AuthorizationException.TokenRequestErrors.INVALID_GRANT;
+        callbackCaptor.getValue().onTokenRequestCompleted(null, refreshException);
+
+        // exception should be propagated to the action
+        verify(action, times(1)).execute(
+                ArgumentMatchers.<String>isNull(),
+                ArgumentMatchers.<String>isNull(),
+                eq(refreshException));
+
+        // the auth state should record the exception
+        assertThat(state.getAuthorizationException()).isEqualTo(refreshException);
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_refreshFails_allQueuedActionsGetException() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action1 = mock(AuthState.AuthStateAction.class);
+        AuthState.AuthStateAction action2 = mock(AuthState.AuthStateAction.class);
+        AuthState.AuthStateAction action3 = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action1);
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action2);
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action3);
+
+        // only one refresh request should have been made
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        AuthorizationException refreshException =
+                AuthorizationException.TokenRequestErrors.INVALID_GRANT;
+        callbackCaptor.getValue().onTokenRequestCompleted(null, refreshException);
+
+        // all three queued actions should receive the same exception
+        verify(action1, times(1)).execute(null, null, refreshException);
+        verify(action2, times(1)).execute(null, null, refreshException);
+        verify(action3, times(1)).execute(null, null, refreshException);
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_needsTokenRefreshOverride_resetAfterSuccess() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        // force refresh even though token is not expired
+        state.setNeedsTokenRefresh(true);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service,
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                action);
+
+        // a refresh should be triggered because of the override
+        ArgumentCaptor<TokenRequest> requestCaptor = ArgumentCaptor.forClass(TokenRequest.class);
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                requestCaptor.capture(),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        Long freshExpirationTime = mClock.currentTime.get() + TWO_MINUTES;
+        TokenResponse freshResponse = new TokenResponse.Builder(requestCaptor.getValue())
+                .setTokenType(TokenResponse.TOKEN_TYPE_BEARER)
+                .setAccessToken("fresh_access_token")
+                .setAccessTokenExpirationTime(freshExpirationTime)
+                .build();
+        callbackCaptor.getValue().onTokenRequestCompleted(freshResponse, null);
+
+        // after successful refresh, getNeedsTokenRefresh should be false
+        assertThat(state.getNeedsTokenRefresh(mClock)).isFalse();
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_needsTokenRefreshOverride_notResetOnFailure() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        state.setNeedsTokenRefresh(true);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service,
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                action);
+
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        // simulate refresh failure
+        callbackCaptor.getValue().onTokenRequestCompleted(
+                null, AuthorizationException.TokenRequestErrors.INVALID_GRANT);
+
+        // the override should still be active after failure
+        assertThat(state.getNeedsTokenRefresh(mClock)).isTrue();
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_additionalParamsPassedToRefreshRequest() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action = mock(AuthState.AuthStateAction.class);
+
+        HashMap<String, String> additionalParams = new HashMap<>();
+        additionalParams.put("custom_param", "custom_value");
+        additionalParams.put("another_param", "another_value");
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service,
+                NoClientAuthentication.INSTANCE,
+                additionalParams,
+                mClock,
+                action);
+
+        ArgumentCaptor<TokenRequest> requestCaptor = ArgumentCaptor.forClass(TokenRequest.class);
+        verify(service, times(1)).performTokenRequest(
+                requestCaptor.capture(),
+                any(ClientAuthentication.class),
+                any(AuthorizationService.TokenResponseCallback.class));
+
+        // additional parameters should be forwarded to the token refresh request
+        TokenRequest refreshRequest = requestCaptor.getValue();
+        assertThat(refreshRequest.additionalParameters).containsEntry(
+                "custom_param", "custom_value");
+        assertThat(refreshRequest.additionalParameters).containsEntry(
+                "another_param", "another_value");
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_noRefreshToken_expiredToken_returnsException() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        // token response without a refresh token
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponseBuilder()
+                .setRefreshToken(null)
+                .build();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+        assertThat(state.getRefreshToken()).isNull();
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+        state.performActionWithFreshTokens(
+                service,
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                action);
+
+        // no token request should be made (no refresh token)
+        verifyNoInteractions(service);
+
+        // action should receive a CLIENT_ERROR exception (from AuthorizationRequestErrors)
+        ArgumentCaptor<AuthorizationException> exCaptor =
+                ArgumentCaptor.forClass(AuthorizationException.class);
+        verify(action, times(1)).execute(
+                ArgumentMatchers.<String>isNull(),
+                ArgumentMatchers.<String>isNull(),
+                exCaptor.capture());
+        assertThat(exCaptor.getValue().type)
+                .isEqualTo(AuthorizationException.TYPE_OAUTH_AUTHORIZATION_ERROR);
+        assertThat(exCaptor.getValue().code)
+                .isEqualTo(AuthorizationException.AuthorizationRequestErrors.CLIENT_ERROR.code);
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_afterRefreshCompletion_newActionTriggersRefresh() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action1 = mock(AuthState.AuthStateAction.class);
+        AuthState.AuthStateAction action2 = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+
+        // first action triggers a refresh
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action1);
+
+        ArgumentCaptor<TokenRequest> requestCaptor = ArgumentCaptor.forClass(TokenRequest.class);
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                requestCaptor.capture(),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        // complete the refresh with new tokens that have a short lifetime
+        Long freshExpirationTime = mClock.currentTime.get() + TWO_MINUTES;
+        TokenResponse freshResponse = new TokenResponse.Builder(requestCaptor.getValue())
+                .setTokenType(TokenResponse.TOKEN_TYPE_BEARER)
+                .setAccessToken("fresh_access_token")
+                .setAccessTokenExpirationTime(freshExpirationTime)
+                .setIdToken("fresh.id.token")
+                .setRefreshToken("fresh_refresh_token")
+                .build();
+        callbackCaptor.getValue().onTokenRequestCompleted(freshResponse, null);
+
+        verify(action1, times(1)).execute(
+                eq("fresh_access_token"), eq("fresh.id.token"),
+                ArgumentMatchers.<AuthorizationException>isNull());
+
+        // advance time past the NEW token expiration
+        mClock.currentTime.set(freshExpirationTime + ONE_SECOND);
+
+        // a new action should trigger a SECOND refresh since tokens have expired again
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action2);
+
+        // service should have been called twice total (once for each refresh)
+        verify(service, times(2)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                any(AuthorizationService.TokenResponseCallback.class));
+    }
+
+    @Test
+    public void testPerformActionWithFreshTokens_afterRefreshFailure_retryTriggersNewRefresh() {
+        AuthorizationRequest authReq = getMinimalAuthRequestBuilder("id_token token code")
+                .setScope("my_scope")
+                .build();
+        AuthorizationResponse authResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken(TEST_ACCESS_TOKEN)
+                .setAccessTokenExpirationTime(TWO_MINUTES)
+                .setIdToken(TEST_ID_TOKEN)
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        TokenResponse tokenResp = getTestAuthCodeExchangeResponse();
+        AuthState state = new AuthState(authResp, tokenResp, null);
+
+        AuthorizationService service = mock(AuthorizationService.class);
+        AuthState.AuthStateAction action1 = mock(AuthState.AuthStateAction.class);
+        AuthState.AuthStateAction action2 = mock(AuthState.AuthStateAction.class);
+
+        mClock.currentTime.set(TWO_MINUTES + ONE_SECOND);
+
+        // first action triggers a refresh which fails
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action1);
+
+        ArgumentCaptor<AuthorizationService.TokenResponseCallback> callbackCaptor =
+                ArgumentCaptor.forClass(AuthorizationService.TokenResponseCallback.class);
+        verify(service, times(1)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                callbackCaptor.capture());
+
+        callbackCaptor.getValue().onTokenRequestCompleted(
+                null, AuthorizationException.TokenRequestErrors.INVALID_GRANT);
+
+        verify(action1, times(1)).execute(
+                ArgumentMatchers.<String>isNull(),
+                ArgumentMatchers.<String>isNull(),
+                any(AuthorizationException.class));
+
+        // the old refresh token is still available (failed refresh doesn't clear it)
+        assertThat(state.getRefreshToken()).isEqualTo(TEST_REFRESH_TOKEN);
+
+        // re-authorize by updating with a fresh auth response (simulates re-login)
+        AuthorizationResponse newAuthResp = new AuthorizationResponse.Builder(authReq)
+                .setAccessToken("new_access_token")
+                .setAccessTokenExpirationTime(mClock.currentTime.get() + TWO_MINUTES)
+                .setIdToken("new.id.token")
+                .setAuthorizationCode(TEST_AUTH_CODE)
+                .setState(authReq.state)
+                .build();
+        state.update(newAuthResp, null);
+        TokenResponse newTokenResp = getTestAuthCodeExchangeResponse();
+        state.update(newTokenResp, null);
+
+        // advance past new expiration
+        mClock.currentTime.set(mClock.currentTime.get() + TWO_MINUTES + ONE_SECOND);
+
+        // retry should trigger a new refresh attempt
+        state.performActionWithFreshTokens(
+                service, NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(), mClock, action2);
+
+        verify(service, times(2)).performTokenRequest(
+                any(TokenRequest.class),
+                any(ClientAuthentication.class),
+                any(AuthorizationService.TokenResponseCallback.class));
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void testPerformActionWithFreshTokens_nullService_throws() {
+        AuthState state = new AuthState(getTestAuthResponse(), null);
+        state.performActionWithFreshTokens(
+                null,
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                mock(AuthState.AuthStateAction.class));
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void testPerformActionWithFreshTokens_nullAction_throws() {
+        AuthState state = new AuthState(getTestAuthResponse(), null);
+        state.performActionWithFreshTokens(
+                mock(AuthorizationService.class),
+                NoClientAuthentication.INSTANCE,
+                Collections.<String, String>emptyMap(),
+                mClock,
+                null);
     }
 }
